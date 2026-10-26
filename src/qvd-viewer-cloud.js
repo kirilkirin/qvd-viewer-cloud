@@ -1,5 +1,5 @@
 /*
- * QVD Viewer for Qlik Cloud - nebula.js visualization extension (version 1.4.1)
+ * QVD Viewer for Qlik Cloud - nebula.js visualization extension (version 1.4.2)
  *
  * How it works
  * 1. Lists the spaces you can access and the QVD files in each space
@@ -24,7 +24,7 @@ define(['@nebula.js/stardust'], function (stardust) {
   var useApp = stardust.useApp;
   var useEffect = stardust.useEffect;
 
-  var VERSION = '1.4.1';
+  var VERSION = '1.4.2';
   var MAX_FILES = 18;          // 20 reload variables minus vQvdCount and vQvdRowLimit
   var MAX_VAR_LENGTH = 256;    // maximum length of a reload variable value
   var PAGE_ROWS = 50;          // records per page
@@ -302,8 +302,8 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     '.qvdv-chip{display:inline-flex;align-items:center;gap:4px;background:var(--g-soft);color:var(--g-dark);border-radius:12px;padding:2px 4px 2px 8px;font-size:11px;max-width:100%}',
     '.qvdv-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.qvdv-chip button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:13px;line-height:1;padding:0 3px}',
-    '.qvdv-btn{height:30px;border-radius:4px;border:1px solid #c9ccd1;background:#fff;color:var(--ink);font:inherit;font-weight:600;padding:0 12px;cursor:pointer;white-space:nowrap}',
-    '.qvdv-btn:hover{border-color:var(--ink3)}',
+    '.qvdv-btn{height:30px;border-radius:4px;border:1px solid #bfe0cc;background:#f2f9f5;color:var(--g-dark);font:inherit;font-weight:600;padding:0 12px;cursor:pointer;white-space:nowrap}',
+    '.qvdv-btn:hover{background:#e0f2e9;border-color:var(--g)}',
     '.qvdv-btn:disabled{opacity:.5;cursor:not-allowed}',
     '.qvdv-btn-primary{background:var(--g);border-color:var(--g);color:#fff}',
     '.qvdv-btn-primary:hover{background:var(--g-dark);border-color:var(--g-dark)}',
@@ -327,16 +327,10 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     '.qvdv-card-v{font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.qvdv-card-v.is-small{font-size:12px;font-weight:500;white-space:normal;word-break:break-all}',
     '.qvdv-card-v a{color:var(--g-dark)}',
-    '.qvdv-card.is-kpi{border-left:0;padding:10px 12px;color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12)}',
-    '.qvdv-card.is-kpi .qvdv-card-k{color:#fff}',
-    '.qvdv-card.is-kpi .qvdv-card-v{font-size:22px;font-weight:700;line-height:1.2;margin-top:2px}',
-    '.qvdv-card.is-green{background:#008936}',
-    '.qvdv-card.is-blue{background:#19426c}',
-    '.qvdv-card.is-ocean{background:#006580}',
-    '.qvdv-card.is-plum{background:#94579c}',
     '.qvdv-sub{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}',
-    '.qvdv-subtab{border:1px solid var(--line);background:#fff;border-radius:14px;padding:3px 12px;font:inherit;cursor:pointer;color:var(--ink2)}',
-    '.qvdv-subtab.is-active{background:var(--ink);border-color:var(--ink);color:#fff}',
+    '.qvdv-subtab{border:1px solid #bfe0cc;background:#f2f9f5;border-radius:14px;padding:3px 12px;font:inherit;cursor:pointer;color:var(--ink2)}',
+    '.qvdv-subtab:hover{background:#e0f2e9;border-color:var(--g)}',
+    '.qvdv-subtab.is-active{background:#e0f2e9;border-color:var(--g);color:var(--g-dark);font-weight:600;box-shadow:inset 0 0 0 1px var(--g)}',
     '.qvdv-tools{display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap}',
     '.qvdv-tools select{width:auto;max-width:220px}',
     '.qvdv-tools input[type=text]{width:200px}',
@@ -1795,14 +1789,14 @@ LET _vqCount = Null(); LET _vqLimit = Null();
         : esc(appId))
       : '';
     var loaded = q.table ? q.table.rows : 0;
-    function card(k, v, small, kpi) {
-      return '<div class="qvdv-card' + (kpi ? ' is-kpi is-' + kpi : '') + '"><div class="qvdv-card-k">' + esc(k) + '</div><div class="qvdv-card-v' + (small ? ' is-small' : '') + '" title="' + (small ? '' : esc(String(v).replace(/<[^>]+>/g, ''))) + '">' + (v === '' ? '–' : v) + '</div></div>';
+    function card(k, v, small) {
+      return '<div class="qvdv-card"><div class="qvdv-card-k">' + esc(k) + '</div><div class="qvdv-card-v' + (small ? ' is-small' : '') + '" title="' + (small ? '' : esc(String(v).replace(/<[^>]+>/g, ''))) + '">' + (v === '' ? '–' : v) + '</div></div>';
     }
     box.innerHTML = '<div class="qvdv-cards">' +
-      card('Records', esc(fmtInt(num(f['Record Count']))), false, 'green') +
-      card('Fields', esc(fmtInt(num(f['Field Count']))), false, 'blue') +
-      card('Rows loaded', esc(fmtInt(loaded)), false, 'ocean') +
-      card('Table name', esc(text(f['Table Name'])), false, 'plum') +
+      card('Records', esc(fmtInt(num(f['Record Count'])))) +
+      card('Fields', esc(fmtInt(num(f['Field Count'])))) +
+      card('Rows loaded', esc(fmtInt(loaded))) +
+      card('Table name', esc(text(f['Table Name']))) +
       card('Created (UTC)', esc(text(h['Create Time UTC']))) +
       card('Record size', esc(text(h['Record Byte Size']) ? text(h['Record Byte Size']) + ' bytes' : '')) +
       card('Space', esc(text(f.Space))) +

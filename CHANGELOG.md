@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.2 — October 2026
+
+### Changes
+- All summary tiles have the same light green style. The solid colored tiles from v1.4.1 are gone.
+- Buttons and the Records, Profile, Fields, Header and Lineage tabs have a light green background. The Load button stays solid green.
+
 ## v1.4.1 — October 2026
 
 ### Fixes
@@ -7,7 +13,7 @@
 - The Catalog link matches the file by its path in the space, so files with the same name in different folders get the right page.
 
 ### Changes
-- Colored summary tiles: Records, Fields, Rows loaded and Table name have solid Qlik colors. The other tiles have a light green background.
+- Summary tiles have a light green background with a green left edge.
 
 ## v1.4.0 — October 2026
 

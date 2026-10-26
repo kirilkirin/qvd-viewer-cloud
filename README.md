@@ -6,7 +6,7 @@ QVD Viewer for Qlik Cloud is a visualization extension that lets you look inside
 
 ## Install
 
-1. Open **Releases** on the right side of this page and download the zip from the latest release (for example `qvd-viewer-cloud-v1.4.1.zip`).
+1. Open **Releases** on the right side of this page and download the zip from the latest release (for example `qvd-viewer-cloud-v1.4.2.zip`).
 2. In the Administration activity center, go to **Extensions** and upload the zip. You need an admin role or the Manage extensions permission. To update, delete the old version first or upload the new zip over it.
 3. Create a new, empty app. Open the **Data load editor** and select **Load data**. This loads the default script, so you can create a sheet.
 4. Go to **Overview**, create a sheet and add **QVD Viewer** from **Custom objects**.
