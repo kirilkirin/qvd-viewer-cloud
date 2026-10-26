@@ -27,6 +27,22 @@ QVD Viewer for Qlik Cloud is a visualization extension that lets you look inside
 - **Lineage:** a tree of where the data comes from and what uses it, up to 5 levels each way, from the Qlik Cloud lineage service. Lineage entries stored in the QVD header are shown when the file has them.
 - **Catalog:** the summary cards above the tabs link to the file's dataset page in the Qlik Cloud Catalog. The Lineage tab links to the lineage view there.
 
+## Compared with the dataset page
+
+Each QVD in the Qlik Cloud Catalog has a dataset page. The extension adds:
+
+- **Full QVD header:** the raw XML header and every element in it, including each field's bit layout (offset, width, bias), symbol count, number format and tags.
+- **Several files at once:** up to 18 QVDs from one or more spaces, each in its own tab.
+- **Your choice of rows:** load a sample or every row. Search any field with wildcards, sort, and export up to 100,000 rows to Excel.
+- **Errors per file:** a file that cannot be read is flagged, and the other files still load.
+- **Data in an app:** the loaded data is in an ordinary Qlik app, so you can add your own charts next to the viewer.
+
+The dataset page is the better choice when you need:
+
+- Nothing to install and no reload.
+- Trust score, data quality and other Catalog metadata.
+- An interactive lineage graph. The extension shows lineage as a tree and links to the Catalog graph.
+
 ## Limits
 
 - Use a dedicated app. In an app that already has its own load script, installing replaces that script. Earlier versions stay in the app's script history.
