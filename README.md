@@ -6,10 +6,11 @@ QVD Viewer for Qlik Cloud is a visualization extension that lets you look inside
 
 ## Install
 
-1. Open **Releases** on the right side of this page and download `qvd-viewer-cloud-v1.3.0.zip` from the latest release.
-2. In the Administration activity center, go to **Extensions** and upload the zip. You need an admin role or the Manage extensions permission.
-3. Create a new, empty app and add **QVD Viewer** to a sheet from **Custom objects**.
-4. Select **Install load script** in the extension. It adds the viewer's load script as a new script section and saves the app.
+1. Open **Releases** on the right side of this page and download the zip from the latest release (for example `qvd-viewer-cloud-v1.4.0.zip`).
+2. In the Administration activity center, go to **Extensions** and upload the zip. You need an admin role or the Manage extensions permission. To update, delete the old version first or upload the new zip over it.
+3. Create a new, empty app. Open the **Data load editor** and select **Load data**. This loads the default script, so you can create a sheet.
+4. Go to **Overview**, create a sheet and add **QVD Viewer** from **Custom objects**.
+5. Select **Install load script** in the extension. It adds the viewer's load script as a new script section and saves the app.
 
 ## Use it
 
@@ -19,16 +20,21 @@ QVD Viewer for Qlik Cloud is a visualization extension that lets you look inside
 
 ## What you can see
 
-- **Records:** browse the loaded rows, 50 per page. Search one field (wildcards `*` and `?` work).
+- **Records:** browse the loaded rows, 50 per page. Search one field (wildcards `*` and `?` work). Select a column header to sort (ascending, descending, off). Copy the page for Excel, or export the loaded rows to an `.xlsx` file.
+- **Profile:** for each field, the type (numeric, text or mixed), non-null and null counts, null %, distinct values, unique %, minimum, maximum and average. Select a field to see its value distribution, most frequent first.
 - **Fields:** number format, tags, distinct values, bit layout and comment of each field.
 - **Header:** every element of the QVD XML header. Show or copy the raw XML.
-- **Lineage:** the app that created the file and the apps that use it, from the Qlik Cloud lineage service. Lineage entries stored in the QVD header are shown when the file has them.
+- **Lineage:** a tree of where the data comes from and what uses it, up to 5 levels each way, from the Qlik Cloud lineage service. Lineage entries stored in the QVD header are shown when the file has them.
+- **Catalog:** the summary cards above the tabs link to the file's dataset page in the Qlik Cloud Catalog. The Lineage tab links to the lineage view there.
 
 ## Limits
 
 - Use a dedicated app. In an app that already has its own load script, installing replaces that script. Earlier versions stay in the app's script history.
 - You need edit rights to the host app to install the script and to reload.
 - QVDs stored by Qlik Cloud apps have an empty lineage element in their header. Use the platform lineage on the Lineage tab instead.
+- The profile, distribution and export use the loaded rows only. To profile a whole file, set rows per file to **All rows**.
+- Export to Excel is limited to 100,000 rows and 2,000,000 cells.
+- The Catalog link shows only when the file has a dataset page in the Catalog.
 - A file path cannot contain an apostrophe or a closing bracket, and must be 256 characters or shorter.
 
 ## Files

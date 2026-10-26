@@ -1,5 +1,5 @@
 /*
- * QVD Viewer for Qlik Cloud - nebula.js visualization extension (version 1.3.0)
+ * QVD Viewer for Qlik Cloud - nebula.js visualization extension (version 1.4.0)
  *
  * How it works
  * 1. Lists the spaces you can access and the QVD files in each space
@@ -24,10 +24,14 @@ define(['@nebula.js/stardust'], function (stardust) {
   var useApp = stardust.useApp;
   var useEffect = stardust.useEffect;
 
-  var VERSION = '1.3.0';
+  var VERSION = '1.4.0';
   var MAX_FILES = 18;          // 20 reload variables minus vQvdCount and vQvdRowLimit
   var MAX_VAR_LENGTH = 256;    // maximum length of a reload variable value
   var PAGE_ROWS = 50;          // records per page
+  var DIST_ROWS = 100;         // values per page in the value distribution
+  var EXPORT_MAX_ROWS = 100000;
+  var EXPORT_MAX_CELLS = 2000000;
+  var LINEAGE_DEPTH = 5;       // levels upstream and downstream
   var MAX_CELLS = 10000;       // engine limit for one hypercube data page
   var STATE = 'QvdViewerState';
   var END_STATUSES = ['SUCCEEDED', 'FAILED', 'CANCELED', 'EXCEEDED_LIMIT'];
@@ -354,6 +358,18 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     '.qvdv-nodes a{color:var(--g-dark);font-weight:600}',
     '.qvdv-node-type{display:inline-block;background:var(--g-soft);color:var(--g-dark);border-radius:3px;padding:0 6px;font-size:11px;margin-right:8px;text-transform:uppercase}',
     '.qvdv-node-rel{color:var(--ink3);font-size:11px;margin-left:6px}',
+    '.qvdv-tree{list-style:none;margin:0 0 12px;padding:0}',
+    '.qvdv-tree ul{list-style:none;margin:0;padding-left:22px;border-left:1px dashed var(--line);margin-left:10px}',
+    '.qvdv-tree-node{border:1px solid var(--line);border-radius:6px;padding:6px 10px;margin:4px 0;display:inline-block;min-width:240px}',
+    '.qvdv-tree-node a{color:var(--g-dark);font-weight:600}',
+    '.qvdv-table th.qvdv-sortable{cursor:pointer;user-select:none}',
+    '.qvdv-table th.qvdv-sortable:hover{color:var(--g-dark)}',
+    '.qvdv-table tr.qvdv-clickable{cursor:pointer}',
+    '.qvdv-table tr.is-selected td{background:var(--g-soft)}',
+    '.qvdv-tools-sep{flex:1 1 auto}',
+    '.qvdv-btn-link{display:inline-flex;align-items:center;text-decoration:none;color:var(--g-dark)}',
+    '.qvdv-bar{height:10px;background:var(--bg2);border-radius:3px;overflow:hidden}',
+    '.qvdv-bar span{display:block;height:100%;background:var(--g)}',
     '.qvdv.is-narrow .qvdv-body{flex-direction:column;overflow:auto}',
     '.qvdv.is-narrow .qvdv-pick{width:auto;flex:0 0 auto;border-right:0;border-bottom:1px solid var(--line)}',
     '.qvdv.is-narrow .qvdv-files{flex:0 0 auto;max-height:180px}',
@@ -464,19 +480,25 @@ LET _vqCount = Null(); LET _vqLimit = Null();
 
   // ---------------------------------------------------------------- engine
 
-  function cubeProps(fields, state) {
+  // sort: optional { col, dir } — sort by column col (1 = ascending, -1 = descending), then by column 0.
+  function cubeProps(fields, state, sort) {
+    var order = fields.map(function (f, i) { return i; });
+    if (sort && sort.col > 0 && sort.col < fields.length) {
+      order = [sort.col].concat(order.filter(function (i) { return i !== sort.col; }));
+    }
     return {
       qInfo: { qType: 'qvdviewer-cube' },
       qHyperCubeDef: {
         qStateName: state,
-        qDimensions: fields.map(function (f) {
+        qDimensions: fields.map(function (f, i) {
+          var dir = sort && sort.col === i ? sort.dir : 1;
           return {
-            qDef: { qFieldDefs: [f], qSortCriterias: [{ qSortByNumeric: 1, qSortByAscii: 1, qSortByLoadOrder: 1 }] },
+            qDef: { qFieldDefs: [f], qSortCriterias: [{ qSortByNumeric: dir, qSortByAscii: dir, qSortByLoadOrder: 1 }] },
             qNullSuppression: false
           };
         }),
         qMeasures: [],
-        qInterColumnSortOrder: fields.map(function (f, i) { return i; }),
+        qInterColumnSortOrder: order,
         qSuppressZero: false,
         qSuppressMissing: false,
         qMode: 'S',
@@ -527,6 +549,138 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     });
   }
 
+  // Field reference for an expression: [name] with ] doubled.
+  function fieldRef(name) { return '[' + String(name).replace(/\]/g, ']]') + ']'; }
+
+  // ---------------------------------------------------------------- Excel (.xlsx) writer
+  // Builds a minimal Office Open XML workbook with one sheet and stores it in an uncompressed ZIP.
+
+  var CRC_TABLE = (function () {
+    var t = new Uint32Array(256);
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) { c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; }
+      t[n] = c >>> 0;
+    }
+    return t;
+  }());
+
+  function crc32(chunks) {
+    var c = 0xFFFFFFFF;
+    chunks.forEach(function (b) {
+      for (var i = 0; i < b.length; i++) { c = CRC_TABLE[(c ^ b[i]) & 0xFF] ^ (c >>> 8); }
+    });
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function zipStore(files) {
+    var enc = new TextEncoder();
+    var parts = [];
+    var central = [];
+    var offset = 0;
+    function u16(v) { return [v & 0xFF, (v >>> 8) & 0xFF]; }
+    function u32(v) { return [v & 0xFF, (v >>> 8) & 0xFF, (v >>> 16) & 0xFF, (v >>> 24) & 0xFF]; }
+    files.forEach(function (f) {
+      var name = enc.encode(f.name);
+      var chunks = f.chunks.map(function (c) { return typeof c === 'string' ? enc.encode(c) : c; });
+      var size = chunks.reduce(function (a, c) { return a + c.length; }, 0);
+      var crc = crc32(chunks);
+      var local = new Uint8Array([].concat([0x50, 0x4B, 0x03, 0x04], u16(20), u16(0x0800), u16(0), u16(0), u16(0x21),
+        u32(crc), u32(size), u32(size), u16(name.length), u16(0)));
+      parts.push(local, name);
+      chunks.forEach(function (c) { parts.push(c); });
+      central.push(new Uint8Array([].concat([0x50, 0x4B, 0x01, 0x02], u16(20), u16(20), u16(0x0800), u16(0), u16(0), u16(0x21),
+        u32(crc), u32(size), u32(size), u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset))), name);
+      offset += local.length + name.length + size;
+    });
+    var centralSize = central.reduce(function (a, c) { return a + c.length; }, 0);
+    var end = new Uint8Array([].concat([0x50, 0x4B, 0x05, 0x06], u16(0), u16(0), u16(files.length), u16(files.length),
+      u32(centralSize), u32(offset), u16(0)));
+    return new Blob(parts.concat(central, [end]), { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  }
+
+  function xmlText(v) {
+    return String(v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function colName(i) {
+    var s = '';
+    i += 1;
+    while (i > 0) { var m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); }
+    return s;
+  }
+
+  // headers: string[]; rows: arrays of cells { t, n } or null. Numbers stay numbers when the
+  // displayed text is the plain number; dates and formatted values are written as text.
+  function buildXlsx(sheetName, headers, rows) {
+    var sheet = [];
+    sheet.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><sheetData>');
+    function strCell(ref, v, style) {
+      var t = String(v);
+      if (t.length > 32767) { t = t.slice(0, 32767); }
+      return '<c r="' + ref + '" t="inlineStr"' + (style ? ' s="1"' : '') + '><is><t xml:space="preserve">' + xmlText(t) + '</t></is></c>';
+    }
+    sheet.push('<row r="1">' + headers.map(function (h, i) { return strCell(colName(i) + '1', h, true); }).join('') + '</row>');
+    var buf = [];
+    rows.forEach(function (r, ri) {
+      var rn = ri + 2;
+      buf.push('<row r="' + rn + '">' + r.map(function (c, ci) {
+        if (c === null || c === undefined) { return ''; }
+        var ref = colName(ci) + rn;
+        var plain = String(c.t).replace(/[\s,]/g, '');
+        if (c.n !== null && isFinite(c.n) && plain !== '' && Number(plain) === c.n) {
+          return '<c r="' + ref + '"><v>' + c.n + '</v></c>';
+        }
+        return strCell(ref, c.t, false);
+      }).join('') + '</row>');
+      if (buf.length >= 2000) { sheet.push(buf.join('')); buf = []; }
+    });
+    sheet.push(buf.join(''));
+    sheet.push('</sheetData></worksheet>');
+    var safeName = String(sheetName || 'Data').replace(/[\[\]:*?\/\\]/g, ' ').slice(0, 31) || 'Data';
+    return zipStore([
+      { name: '[Content_Types].xml', chunks: ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+        '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'] },
+      { name: '_rels/.rels', chunks: ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'] },
+      { name: 'xl/workbook.xml', chunks: ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+        '<sheets><sheet name="' + xmlText(safeName) + '" sheetId="1" r:id="rId1"/></sheets></workbook>'] },
+      { name: 'xl/_rels/workbook.xml.rels', chunks: ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'] },
+      { name: 'xl/styles.xml', chunks: ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+        '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
+        '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+        '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+        '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>' +
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+        '</styleSheet>'] },
+      { name: 'xl/worksheets/sheet1.xml', chunks: sheet }
+    ]);
+  }
+
+  function downloadBlob(blob, fileName) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 2000);
+  }
+
+  function copyText(textValue) {
+    if (navigator.clipboard && navigator.clipboard.writeText) { return navigator.clipboard.writeText(textValue); }
+    return Promise.reject(new Error('Copy is not available in this browser.'));
+  }
+
   // Keeps only rows that have a value in at least one non-key field.
   function realRows(rows, fields) {
     return rows.filter(function (r) {
@@ -555,7 +709,11 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     this.records = null;     // { key, obj, fields, total, top, loading, error }
     this.search = { field: '', text: '' };
     this.appNames = {};
-    this.lineage = {};       // QvdKey -> { loading, error, qri, up, down }
+    this.lineage = {};       // QvdKey -> { loading, error, qri, upTree, down }
+    this.profile = {};       // QvdKey -> { loading, error, rows }
+    this.dist = null;        // value distribution: { key, field, obj, total, top, rows, loading, error }
+    this.catalog = {};       // QvdKey -> { loading, url }
+    this.profileState = '$';
     this.showXml = false;
     this.spacesReady = null;
     this.script = { status: 'unknown', version: null, confirm: false, busy: false };
@@ -606,7 +764,15 @@ LET _vqCount = Null(); LET _vqLimit = Null();
       }).catch(function () { self.state = '$'; })
       : Promise.resolve();
 
-    stateReady.then(function () {
+    var profileStateName = stateName + 'P';
+    var profileReady = this.app.addSessionAlternateState
+      ? this.app.addSessionAlternateState(profileStateName).then(function () {
+        if (self.destroyed) { self.app.removeSessionAlternateState(profileStateName).catch(function () {}); return; }
+        self.profileState = profileStateName;
+      }).catch(function () { self.profileState = '$'; })
+      : Promise.resolve();
+
+    Promise.all([stateReady, profileReady]).then(function () {
       if (self.destroyed) { return null; }
       self.checkScript();
       self.spacesReady = self.loadSpaces();
@@ -617,6 +783,10 @@ LET _vqCount = Null(); LET _vqLimit = Null();
   Viewer.prototype.destroy = function () {
     this.destroyed = true;
     this.closeRecords();
+    this.closeDist();
+    if (this.profileState !== '$' && this.app.removeSessionAlternateState) {
+      this.app.removeSessionAlternateState(this.profileState).catch(function () {});
+    }
     if (this.state !== '$' && this.app.removeSessionAlternateState) {
       this.app.removeSessionAlternateState(this.state).catch(function () {});
     }
@@ -684,16 +854,17 @@ LET _vqCount = Null(); LET _vqLimit = Null();
           name: name,
           type: space ? space.type : '',
           connectionId: c.id,
+          spaceId: c.spaceId,
           lib: 'lib://' + name + ':DataFiles/'
         });
       });
       list.sort(function (a, b) { return a.name.localeCompare(b.name); });
-      list.unshift({ key: 'personal', name: 'Personal', type: 'personal', connectionId: null, lib: 'lib://DataFiles/' });
+      list.unshift({ key: 'personal', name: 'Personal', type: 'personal', connectionId: null, spaceId: 'personal', lib: 'lib://DataFiles/' });
       self.spaces = list;
       self.renderPicker();
       return self.loadFiles();
     }).catch(function (err) {
-      self.spaces = [{ key: 'personal', name: 'Personal', type: 'personal', connectionId: null, lib: 'lib://DataFiles/' }];
+      self.spaces = [{ key: 'personal', name: 'Personal', type: 'personal', connectionId: null, spaceId: 'personal', lib: 'lib://DataFiles/' }];
       self.renderPicker();
       self.showError('Could not list spaces.', err);
       return self.loadFiles();
@@ -882,6 +1053,9 @@ LET _vqCount = Null(); LET _vqLimit = Null();
         });
         self.model = { run: r[0][0] || null, qvds: qvds, tables: tables };
         self.lineage = {};
+        self.profile = {};
+        self.catalog = {};
+        self.closeDist();
         if (!qvds.some(function (q) { return q.key === self.activeKey; })) {
           self.activeKey = qvds.length ? qvds[0].key : null;
         }
@@ -1111,7 +1285,7 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     this.closeRecords();
     if (!q || !q.table) { this.renderPanel(); return Promise.resolve(); }
     var fields = this.recordFields(q);
-    var rec = { key: q.key, obj: null, fields: fields, total: 0, top: 0, rows: [], loading: true, error: '' };
+    var rec = { key: q.key, obj: null, fields: fields, total: 0, top: 0, rows: [], loading: true, error: '', sort: null };
     this.records = rec;
     this.search = { field: fields[1] || fields[0] || '', text: '' };
     this.renderPanel();
@@ -1126,6 +1300,90 @@ LET _vqCount = Null(); LET _vqLimit = Null();
       rec.loading = false;
       rec.error = 'Could not read the records. ' + (err.message || err);
       self.renderPanel();
+    });
+  };
+
+  // Sorts by column col: ascending, then descending, then back to load order.
+  Viewer.prototype.sortRecords = function (col) {
+    var self = this;
+    var rec = this.records;
+    if (!rec || !rec.obj || rec.loading) { return; }
+    if (!rec.sort || rec.sort.col !== col) { rec.sort = { col: col, dir: 1 }; }
+    else if (rec.sort.dir === 1) { rec.sort = { col: col, dir: -1 }; }
+    else { rec.sort = null; }
+    var old = rec.obj;
+    rec.obj = null;
+    rec.loading = true;
+    this.renderRecordsBody();
+    this.app.destroySessionObject(old.id).catch(function () {}).then(function () {
+      return self.app.createSessionObject(cubeProps(rec.fields, self.state, rec.sort));
+    }).then(function (obj) {
+      if (self.records !== rec) { self.app.destroySessionObject(obj.id).catch(function () {}); return null; }
+      rec.obj = obj;
+      return self.fetchRecords(0);
+    }).catch(function (err) {
+      rec.loading = false;
+      rec.error = 'Could not sort the records. ' + (err.message || err);
+      self.renderRecordsBody();
+    });
+  };
+
+  Viewer.prototype.recordHeaders = function (rec) {
+    var prefix = 'Q' + rec.key + '.';
+    return rec.fields.slice(1).map(function (f) { return f.slice(prefix.length); });
+  };
+
+  Viewer.prototype.copyPage = function () {
+    var self = this;
+    var rec = this.records;
+    if (!rec || !rec.rows.length) { return; }
+    function clean(v) { return String(v).replace(/[\t\r\n]+/g, ' '); }
+    var lines = [this.recordHeaders(rec).map(clean).join('\t')].concat(rec.rows.map(function (r) {
+      return r.slice(1).map(function (c) { return c === null ? '' : clean(c.t); }).join('\t');
+    }));
+    copyText(lines.join('\r\n')).then(function () {
+      self.setRecordsNote('Copied ' + fmtInt(rec.rows.length) + ' rows. Paste them into Excel.');
+    }, function () {
+      self.setRecordsNote('Copy failed. Your browser blocked access to the clipboard.');
+    });
+  };
+
+  Viewer.prototype.setRecordsNote = function (textValue) {
+    var el = this.root.querySelector('[data-ref=records-note]');
+    if (el) { el.textContent = textValue; }
+  };
+
+  // Exports the loaded rows in the current sort and search to an .xlsx file.
+  Viewer.prototype.exportRecords = function () {
+    var self = this;
+    var rec = this.records;
+    var q = this.activeQvd();
+    if (!rec || !rec.obj || !q || this.busy) { return; }
+    var width = rec.fields.length;
+    var maxRows = Math.min(EXPORT_MAX_ROWS, Math.floor(EXPORT_MAX_CELLS / width));
+    var total = Math.min(rec.total, maxRows);
+    var height = Math.max(1, Math.floor(MAX_CELLS / width));
+    var rows = [];
+    var obj = rec.obj;
+    this.setBusy('Preparing the Excel file… 0 of ' + fmtInt(total) + ' rows');
+    function next(top) {
+      if (top >= total || self.records !== rec) { return Promise.resolve(); }
+      return getPage(obj, top, Math.min(height, total - top), width).then(function (m) {
+        m.forEach(function (r) { rows.push(r.slice(1).map(toCell)); });
+        self.setBusy('Preparing the Excel file… ' + fmtInt(rows.length) + ' of ' + fmtInt(total) + ' rows');
+        return next(top + height);
+      });
+    }
+    next(0).then(function () {
+      var base = text(q.file['File Name']).replace(/\.qvd$/i, '') || 'qvd';
+      var blob = buildXlsx(text(q.file['Table Name']) || base, self.recordHeaders(rec), rows);
+      downloadBlob(blob, base + '.xlsx');
+      self.setBusy('');
+      self.setRecordsNote('Exported ' + fmtInt(rows.length) + ' rows to ' + base + '.xlsx.' +
+        (rec.total > total ? ' The export stops at ' + fmtInt(total) + ' rows; ' + fmtInt(rec.total) + ' rows match.' : ''));
+    }).catch(function (err) {
+      self.setBusy('');
+      self.setRecordsNote('The export failed. ' + (err.message || err));
     });
   };
 
@@ -1184,6 +1442,267 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     });
   };
 
+  // ---------------------------------------------------------------- profile and value distribution
+  // Calculated by the engine on the loaded rows. {1} ignores selections, so the search on the
+  // Records tab does not change the profile.
+
+  var PROFILE_MEASURES = [
+    ['distinct', 'Count({1} DISTINCT %F)'],
+    ['nonNull', 'Count({1} %F)'],
+    ['nulls', 'NullCount({1} %F)'],
+    ['numeric', 'NumericCount({1} %F)'],
+    ['textCount', 'TextCount({1} %F)'],
+    ['min', 'If(NumericCount({1} %F) > 0, FirstSortedValue({1} DISTINCT %F, %F), MinString({1} %F))'],
+    ['max', 'If(NumericCount({1} %F) > 0, FirstSortedValue({1} DISTINCT %F, -%F), MaxString({1} %F))'],
+    ['avg', 'Round(Avg({1} %F), 0.0001)']
+  ];
+  var PROFILE_FIELDS_PER_CUBE = 10;
+
+  Viewer.prototype.loadProfile = function (q) {
+    var self = this;
+    if (!q.table || this.profile[q.key]) { return; }
+    var entry = { loading: true, rows: [], error: '' };
+    this.profile[q.key] = entry;
+    var fields = this.recordFields(q).slice(1);
+    var prefix = 'Q' + q.key + '.';
+    var groups = [];
+    for (var i = 0; i < fields.length; i += PROFILE_FIELDS_PER_CUBE) { groups.push(fields.slice(i, i + PROFILE_FIELDS_PER_CUBE)); }
+    var results = [];
+    var chain = Promise.resolve();
+    groups.forEach(function (group) {
+      chain = chain.then(function () {
+        var measures = [];
+        group.forEach(function (f) {
+          PROFILE_MEASURES.forEach(function (m) {
+            measures.push({ qDef: { qDef: m[1].replace(/%F/g, fieldRef(f)) } });
+          });
+        });
+        return self.app.createSessionObject({
+          qInfo: { qType: 'qvdviewer-profile' },
+          qHyperCubeDef: { qStateName: self.profileState, qDimensions: [], qMeasures: measures, qInitialDataFetch: [{ qTop: 0, qLeft: 0, qWidth: measures.length, qHeight: 1 }] }
+        }).then(function (obj) {
+          return obj.getLayout().then(function (layout) {
+            var row = (layout.qHyperCube.qDataPages[0] && layout.qHyperCube.qDataPages[0].qMatrix[0]) || [];
+            group.forEach(function (f, gi) {
+              var r = { field: f.slice(prefix.length) };
+              PROFILE_MEASURES.forEach(function (m, mi) {
+                var cell = row[gi * PROFILE_MEASURES.length + mi];
+                r[m[0]] = cell && !cell.qIsNull && cell.qText !== '-' ? { t: cell.qText, n: typeof cell.qNum === 'number' && !isNaN(cell.qNum) ? cell.qNum : null } : null;
+              });
+              results.push(r);
+            });
+          }).then(function () {
+            return self.app.destroySessionObject(obj.id).catch(function () {});
+          }, function (err) {
+            return self.app.destroySessionObject(obj.id).catch(function () {}).then(function () { throw err; });
+          });
+        });
+      });
+    });
+    chain.then(function () {
+      entry.rows = results;
+      entry.loading = false;
+      self.renderProfileIfActive(q.key);
+    }).catch(function (err) {
+      entry.loading = false;
+      entry.error = 'Could not calculate the profile. ' + (err.message || err);
+      self.renderProfileIfActive(q.key);
+    });
+  };
+
+  Viewer.prototype.renderProfileIfActive = function (key) {
+    if (this.subTab === 'profile' && this.activeKey === key) {
+      var box = this.refs.main.querySelector('[data-ref=profile]');
+      var q = this.activeQvd();
+      if (box && q) { box.innerHTML = this.profileTableHtml(q); }
+    }
+  };
+
+  Viewer.prototype.profileHtml = function (q) {
+    if (!q.table) { return '<div class="qvdv-empty">No records were loaded for this file.</div>'; }
+    var rows = q.table.rows;
+    var total = num(q.file['Record Count']);
+    var note = total !== null && rows < total
+      ? 'Calculated on the ' + fmtInt(rows) + ' loaded rows of ' + fmtInt(total) + '. Load with "All rows" to profile the whole file.'
+      : 'Calculated on all ' + fmtInt(rows) + ' rows.';
+    return '<div class="qvdv-hint" style="margin:0 0 8px">' + esc(note) + ' Select a field to see its values.</div>' +
+      '<div data-ref="profile">' + this.profileTableHtml(q) + '</div><div data-ref="dist">' + this.distHtml() + '</div>';
+  };
+
+  Viewer.prototype.profileTableHtml = function (q) {
+    var p = this.profile[q.key];
+    if (!p || p.loading) { return '<div class="qvdv-empty">Calculating the profile…</div>'; }
+    if (p.error) { return '<div class="qvdv-alert">' + esc(p.error) + '</div>'; }
+    var rowsLoaded = q.table.rows;
+    var active = this.dist && this.dist.key === q.key ? this.dist.field : null;
+    var formatType = {};
+    ((q.xml && q.xml.fields) || []).forEach(function (f) { formatType[f.FieldName] = (f.numberFormat && f.numberFormat.Type) || ''; });
+    var noAverage = /^(DATE|TIME|TIMESTAMP|INTERVAL)$/;
+    function n(c) { return c && c.n !== null ? c.n : null; }
+    function pct(a, b) { return b ? (Math.round(a / b * 1000) / 10).toLocaleString() + ' %' : ''; }
+    return '<div class="qvdv-tablewrap"><table class="qvdv-table"><thead><tr>' +
+      ['Field', 'Type', 'Non-null', 'Nulls', 'Null %', 'Distinct', 'Unique %', 'Minimum', 'Maximum', 'Average'].map(function (h) { return '<th>' + h + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + p.rows.map(function (r) {
+        var nonNull = n(r.nonNull) || 0;
+        var nulls = n(r.nulls) || 0;
+        var distinct = n(r.distinct) || 0;
+        var numeric = n(r.numeric) || 0;
+        var textCount = n(r.textCount) || 0;
+        var type = !nonNull ? 'empty' : (!textCount ? 'numeric' : (!numeric ? 'text' : 'mixed'));
+        var unique = nonNull && distinct === nonNull && !nulls;
+        return '<tr class="qvdv-clickable' + (active === r.field ? ' is-selected' : '') + '" data-action="dist" data-field="' + esc(r.field) + '" title="Show the values of this field">' +
+          '<td><strong>' + esc(r.field) + '</strong>' + (unique ? ' <span class="qvdv-tag" title="Every row has a different value">unique</span>' : '') + '</td>' +
+          '<td>' + esc(type) + '</td>' +
+          '<td class="is-num">' + esc(fmtInt(nonNull)) + '</td>' +
+          '<td class="is-num">' + esc(fmtInt(nulls)) + '</td>' +
+          '<td class="is-num">' + esc(pct(nulls, rowsLoaded)) + '</td>' +
+          '<td class="is-num">' + esc(fmtInt(distinct)) + '</td>' +
+          '<td class="is-num">' + esc(pct(distinct, nonNull)) + '</td>' +
+          '<td>' + esc(r.min ? r.min.t : '') + '</td>' +
+          '<td>' + esc(r.max ? r.max.t : '') + '</td>' +
+          '<td class="is-num">' + esc(r.avg && !noAverage.test(formatType[r.field] || '') ? r.avg.t : '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  };
+
+  Viewer.prototype.closeDist = function () {
+    var d = this.dist;
+    this.dist = null;
+    if (d && d.obj) { this.app.destroySessionObject(d.obj.id).catch(function () {}); }
+  };
+
+  Viewer.prototype.openDist = function (fieldName) {
+    var self = this;
+    var q = this.activeQvd();
+    if (!q || !q.table) { return; }
+    if (this.dist && this.dist.key === q.key && this.dist.field === fieldName) { return; }
+    this.closeDist();
+    var prefix = 'Q' + q.key + '.';
+    var d = { key: q.key, field: fieldName, obj: null, total: 0, top: 0, rows: [], loading: true, error: '' };
+    this.dist = d;
+    this.renderDist();
+    this.renderProfileIfActive(q.key);
+    this.app.createSessionObject({
+      qInfo: { qType: 'qvdviewer-dist' },
+      qHyperCubeDef: {
+        qStateName: this.profileState,
+        qDimensions: [{ qDef: { qFieldDefs: [prefix + fieldName], qSortCriterias: [{ qSortByNumeric: 1, qSortByAscii: 1 }] }, qNullSuppression: false }],
+        qMeasures: [{ qDef: { qDef: 'Count({1} ' + fieldRef(prefix + '__Row') + ')' }, qSortBy: { qSortByNumeric: -1 } }],
+        qInterColumnSortOrder: [1, 0],
+        qSuppressZero: false,
+        qSuppressMissing: false,
+        qMode: 'S',
+        qInitialDataFetch: []
+      }
+    }).then(function (obj) {
+      if (self.dist !== d) { self.app.destroySessionObject(obj.id).catch(function () {}); return null; }
+      d.obj = obj;
+      return self.fetchDist(0);
+    }).catch(function (err) {
+      d.loading = false;
+      d.error = 'Could not read the values. ' + (err.message || err);
+      self.renderDist();
+    });
+  };
+
+  Viewer.prototype.fetchDist = function (top) {
+    var self = this;
+    var d = this.dist;
+    if (!d || !d.obj) { return Promise.resolve(); }
+    d.loading = true;
+    return d.obj.getLayout().then(function (layout) {
+      d.total = layout.qHyperCube.qSize.qcy;
+      var start = Math.max(0, Math.min(top, Math.max(0, d.total - 1)));
+      if (!d.total) { return []; }
+      return getPage(d.obj, start, Math.min(DIST_ROWS, d.total - start), 2).then(function (m) { d.top = start; return m; });
+    }).then(function (m) {
+      if (self.dist !== d) { return; }
+      d.rows = m.map(function (r) { return { value: r[0] && !r[0].qIsNull ? r[0].qText : null, count: r[1] ? r[1].qNum : 0 }; });
+      d.loading = false;
+      self.renderDist();
+    }).catch(function (err) {
+      if (self.dist !== d) { return; }
+      d.loading = false;
+      d.error = 'Could not read the values. ' + (err.message || err);
+      self.renderDist();
+    });
+  };
+
+  Viewer.prototype.renderDist = function () {
+    var box = this.refs.main.querySelector('[data-ref=dist]');
+    if (box) { box.innerHTML = this.distHtml(); }
+  };
+
+  Viewer.prototype.distHtml = function () {
+    var d = this.dist;
+    var q = this.activeQvd();
+    if (!d || !q || d.key !== q.key) { return ''; }
+    var html = '<h4 class="qvdv-h4">Values of ' + esc(d.field) + '</h4>';
+    if (d.error) { return html + '<div class="qvdv-alert">' + esc(d.error) + '</div>'; }
+    if (d.loading && !d.rows.length) { return html + '<div class="qvdv-empty">Loading values…</div>'; }
+    var rowsLoaded = q.table ? q.table.rows : 0;
+    var maxCount = d.rows.reduce(function (a, r) { return Math.max(a, r.count); }, 0) || 1;
+    var to = Math.min(d.top + DIST_ROWS, d.total);
+    return html + '<div class="qvdv-tablewrap"><table class="qvdv-table"><thead><tr><th>Value</th><th>Rows</th><th>% of rows</th><th style="width:40%"></th></tr></thead><tbody>' +
+      d.rows.map(function (r) {
+        var share = rowsLoaded ? r.count / rowsLoaded * 100 : 0;
+        return '<tr><td' + (r.value === null ? ' class="is-null"' : '') + ' title="' + esc(r.value === null ? 'null' : r.value) + '">' + esc(r.value === null ? 'null' : r.value) + '</td>' +
+          '<td class="is-num">' + esc(fmtInt(r.count)) + '</td>' +
+          '<td class="is-num">' + esc((Math.round(share * 10) / 10).toLocaleString()) + ' %</td>' +
+          '<td><div class="qvdv-bar"><span style="width:' + Math.max(1, Math.round(r.count / maxCount * 100)) + '%"></span></div></td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<div class="qvdv-pager"><button class="qvdv-btn" data-action="dist-page" data-dir="prev"' + (d.top <= 0 ? ' disabled' : '') + '>‹</button>' +
+      '<span>Values ' + esc(fmtInt(d.total ? d.top + 1 : 0)) + '–' + esc(fmtInt(to)) + ' of ' + esc(fmtInt(d.total)) + ', most frequent first' + (d.loading ? ' · loading…' : '') + '</span>' +
+      '<button class="qvdv-btn" data-action="dist-page" data-dir="next"' + (to >= d.total ? ' disabled' : '') + '>›</button></div>';
+  };
+
+  // ---------------------------------------------------------------- Catalog link
+
+  // Finds the file's dataset page in the Catalog through the items API.
+  Viewer.prototype.loadCatalogLink = function (q) {
+    var self = this;
+    if (this.catalog[q.key] || q.isError) { return; }
+    var entry = { loading: true, url: null };
+    this.catalog[q.key] = entry;
+    var path = text(q.file['File Path']);
+    var m = /^lib:\/\/(.+?):DataFiles\/(.+)$/i.exec(path);
+    var personal = /^lib:\/\/DataFiles\/(.+)$/i.exec(path);
+    var spaceName = m ? m[1] : null;
+    var name = m ? m[2] : (personal ? personal[1] : null);
+    if (!name) { entry.loading = false; return; }
+    var base = name.split('/').pop();
+    (this.spacesReady || Promise.resolve()).then(function () {
+      var spaceId = 'personal';
+      if (spaceName) {
+        var space = self.spaces.filter(function (s) { return s.name.toLowerCase() === spaceName.toLowerCase(); })[0];
+        if (!space || !space.spaceId) { return []; }
+        spaceId = space.spaceId;
+      }
+      return apiAll('/api/v1/items?resourceType=dataset&limit=100&spaceId=' + encodeURIComponent(spaceId) + '&name=' + encodeURIComponent(base), 500);
+    }).then(function (items) {
+      var full = name.toLowerCase();
+      var sameName = items.filter(function (it) { return String(it.name || '').toLowerCase() === base.toLowerCase(); });
+      var exact = sameName.filter(function (it) {
+        return JSON.stringify(it.resourceAttributes || {}).toLowerCase().indexOf('"' + full + '"') >= 0;
+      });
+      var pick = exact[0] || (sameName.length === 1 ? sameName[0] : null);
+      entry.url = pick && pick.links && pick.links.open && pick.links.open.href ? pick.links.open.href : null;
+    }).catch(function () {
+      entry.url = null;
+    }).then(function () {
+      entry.loading = false;
+      if (self.activeKey === q.key) {
+        self.renderCards();
+        if (self.subTab === 'lineage') { self.renderLineageIfActive(q.key); }
+      }
+    });
+  };
+
+  Viewer.prototype.catalogUrl = function (q, hash) {
+    var c = this.catalog[q.key];
+    if (!c || !c.url) { return null; }
+    return hash ? c.url.replace(/#.*$/, '') + '#' + hash : c.url;
+  };
+
   // ---------------------------------------------------------------- main rendering
 
   Viewer.prototype.renderMain = function () {
@@ -1236,7 +1755,7 @@ LET _vqCount = Null(); LET _vqLimit = Null();
         '<br><small>' + esc(text(q.file['File Path'])) + '</small></div>';
     }
     html += '<div data-ref="cards"></div>';
-    var tabs = [['records', 'Records'], ['fields', 'Fields (' + q.fields.length + ')'], ['header', 'Header'], ['lineage', 'Lineage']];
+    var tabs = [['records', 'Records'], ['profile', 'Profile'], ['fields', 'Fields (' + q.fields.length + ')'], ['header', 'Header'], ['lineage', 'Lineage']];
     var sub = this.subTab;
     html += '<div class="qvdv-sub">' + tabs.map(function (t) {
       return '<button class="qvdv-subtab' + (t[0] === sub ? ' is-active' : '') + '" data-action="subtab" data-tab="' + t[0] + '">' + esc(t[1]) + '</button>';
@@ -1245,6 +1764,7 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     this.renderCards();
     var content = panel.querySelector('[data-ref=content]');
     if (sub === 'records') { this.renderRecords(content, q); }
+    else if (sub === 'profile') { content.innerHTML = this.profileHtml(q); this.loadProfile(q); }
     else if (sub === 'fields') { content.innerHTML = this.fieldsHtml(q); }
     else if (sub === 'header') { content.innerHTML = this.headerHtml(q); }
     else { content.innerHTML = this.lineageHtml(q); this.loadPlatformLineage(q); }
@@ -1276,7 +1796,17 @@ LET _vqCount = Null(); LET _vqLimit = Null();
       card('Record size', esc(text(h['Record Byte Size']) ? text(h['Record Byte Size']) + ' bytes' : '')) +
       card('Space', esc(text(f.Space))) +
       card('Creator app', creator, true) +
+      card('Catalog', this.catalogCardHtml(q), true) +
       '</div>';
+    this.loadCatalogLink(q);
+  };
+
+  Viewer.prototype.catalogCardHtml = function (q) {
+    var c = this.catalog[q.key];
+    if (q.isError) { return ''; }
+    if (!c || c.loading) { return '<span style="color:#8a8f98">Looking up…</span>'; }
+    var url = this.catalogUrl(q);
+    return url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener">Open dataset page ↗</a>' : '<span style="color:#8a8f98">Not found in the Catalog</span>';
   };
 
   Viewer.prototype.renderRecords = function (content, q) {
@@ -1297,7 +1827,11 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     content.innerHTML = '<div class="qvdv-tools"><select data-ref="search-field" aria-label="Field to search">' + options + '</select>' +
       '<input type="text" data-ref="search-text" placeholder="Search values (* and ? allowed)" value="' + esc(this.search.text) + '">' +
       '<button class="qvdv-btn" data-action="search">Search</button>' +
-      '<button class="qvdv-btn" data-action="search-clear">Clear</button></div>' +
+      '<button class="qvdv-btn" data-action="search-clear">Clear</button>' +
+      '<span class="qvdv-tools-sep"></span>' +
+      '<button class="qvdv-btn" data-action="copy-page" title="Copy the rows on this page as tab-separated text">Copy page</button>' +
+      '<button class="qvdv-btn" data-action="export-xlsx" title="Export the loaded rows, in the current sort and search, to Excel">Export to Excel</button></div>' +
+      '<div class="qvdv-hint" data-ref="records-note" style="margin:0 0 6px"></div>' +
       '<div data-ref="records"></div>';
     this.renderRecordsBody();
   };
@@ -1309,8 +1843,11 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     if (rec.error) { box.innerHTML = '<div class="qvdv-alert">' + esc(rec.error) + '</div>'; return; }
     if (rec.loading && !rec.rows.length) { box.innerHTML = '<div class="qvdv-empty">Loading records…</div>'; return; }
     var prefix = 'Q' + rec.key + '.';
+    var sort = rec.sort;
     var head = rec.fields.map(function (f, i) {
-      return i === 0 ? '<th class="qvdv-rowno">#</th>' : '<th>' + esc(f.slice(prefix.length)) + '</th>';
+      if (i === 0) { return '<th class="qvdv-rowno" title="Load order">#</th>'; }
+      var mark = sort && sort.col === i ? (sort.dir === 1 ? ' ▲' : ' ▼') : '';
+      return '<th class="qvdv-sortable" data-action="sort" data-col="' + i + '" title="Sort by this field">' + esc(f.slice(prefix.length)) + mark + '</th>';
     }).join('');
     var body = rec.rows.map(function (r) {
       return '<tr>' + r.map(function (c, i) {
@@ -1419,15 +1956,28 @@ LET _vqCount = Null(); LET _vqLimit = Null();
   };
 
   Viewer.prototype.lineageHtml = function (q) {
-    var html = '<h4 class="qvdv-h4">Platform lineage (Qlik Cloud lineage service)</h4>';
+    var catalogLink = this.catalogUrl(q, 'lineage');
+    var html = '<div class="qvdv-tools" style="justify-content:space-between"><h4 class="qvdv-h4" style="margin:0">Platform lineage (Qlik Cloud lineage service)</h4>' +
+      (catalogLink ? '<a class="qvdv-btn qvdv-btn-link" href="' + esc(catalogLink) + '" target="_blank" rel="noopener">Open lineage in the Catalog ↗</a>' : '') + '</div>';
     var lin = this.lineage[q.key];
     if (!lin || lin.loading) {
       html += '<div class="qvdv-empty">Loading lineage…</div>';
     } else if (lin.error) {
       html += '<div class="qvdv-alert">' + esc(lin.error) + '</div>';
     } else {
-      html += this.nodeListHtml('Created by (one step upstream)', lin.up, 'No upstream lineage was found.') +
-        this.nodeListHtml('Used by (one step downstream)', lin.down, 'No app or file uses this file yet.');
+      html += '<div class="qvdv-sublabel">Upstream: where the data comes from (up to ' + LINEAGE_DEPTH + ' levels)</div>' +
+        (lin.upTree && lin.upTree.children.length
+          ? '<ul class="qvdv-tree">' + this.treeHtml(lin.upTree.children) + '</ul>'
+          : '<div class="qvdv-empty" style="padding:4px 0 12px">No upstream lineage was found.</div>');
+      html += '<div class="qvdv-sublabel">Downstream: what uses this file (up to ' + LINEAGE_DEPTH + ' levels)</div>';
+      if (lin.downTree) {
+        html += lin.downTree.children.length
+          ? '<ul class="qvdv-tree">' + this.treeHtml(lin.downTree.children) + '</ul>'
+          : '<div class="qvdv-empty" style="padding:4px 0 12px">Nothing uses this file yet.</div>';
+      } else {
+        html += this.nodeListHtml('Direct', lin.down, 'Nothing uses this file yet.') +
+          (lin.further.length ? this.nodeListHtml('Further downstream', lin.further, '') : '');
+      }
     }
     var headerLineage = q.xml ? q.xml.lineage : q.lineage.map(function (l) {
       return { source: text(l['Lineage Source']), statement: text(l['Lineage Statement']) };
@@ -1444,17 +1994,30 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     return html;
   };
 
+  Viewer.prototype.nodeLabelHtml = function (n) {
+    var appId = /^qri:app:sense:\/\/([0-9a-f-]{36})/i.exec(n.qri);
+    var name = appId
+      ? '<a href="/sense/app/' + esc(appId[1]) + '" target="_blank" rel="noopener">' + esc(n.label || appId[1]) + '</a>'
+      : esc(n.label || n.qri);
+    return '<span class="qvdv-node-type">' + esc(n.type) + '</span>' + name +
+      (n.relation ? ' <span class="qvdv-node-rel">' + esc(n.relation) + '</span>' : '');
+  };
+
+  Viewer.prototype.treeHtml = function (nodes) {
+    var self = this;
+    return nodes.map(function (n) {
+      return '<li><div class="qvdv-tree-node" title="' + esc(n.qri) + '">' + self.nodeLabelHtml(n) +
+        (n.cycle ? ' <span class="qvdv-node-rel">(shown above)</span>' : '') + '</div>' +
+        (n.children && n.children.length ? '<ul>' + self.treeHtml(n.children) + '</ul>' : '') + '</li>';
+    }).join('');
+  };
+
   Viewer.prototype.nodeListHtml = function (title, nodes, emptyText) {
-    var html = '<div class="qvdv-sublabel">' + esc(title) + '</div>';
+    var self = this;
+    var html = '<div class="qvdv-sublabel" style="font-weight:500">' + esc(title) + '</div>';
     if (!nodes.length) { return html + '<div class="qvdv-empty" style="padding:4px 0 12px">' + esc(emptyText) + '</div>'; }
-    return html + '<ul class="qvdv-nodes">' + nodes.map(function (n) {
-      var appId = /^qri:app:sense:\/\/([0-9a-f-]{36})/i.exec(n.qri);
-      var name = appId
-        ? '<a href="/sense/app/' + esc(appId[1]) + '" target="_blank" rel="noopener">' + esc(n.label || appId[1]) + '</a>'
-        : esc(n.label || n.qri);
-      return '<li><span class="qvdv-node-type">' + esc(n.type) + '</span>' + name +
-        (n.relation ? ' <span class="qvdv-node-rel">' + esc(n.relation) + '</span>' : '') +
-        '<div class="qvdv-file-meta">' + esc(n.qri) + '</div></li>';
+    return html + '<ul class="qvdv-tree">' + nodes.map(function (n) {
+      return '<li><div class="qvdv-tree-node" title="' + esc(n.qri) + '">' + self.nodeLabelHtml(n) + '</div></li>';
     }).join('') + '</ul>';
   };
 
@@ -1480,6 +2043,37 @@ LET _vqCount = Null(); LET _vqLimit = Null();
 
   function firstGraph(res) {
     return (res && (res.graph || (res.graphs && res.graphs[0]))) || { nodes: {}, edges: [] };
+  }
+
+  // Builds a tree from a lineage graph. upstream: children are the sources of a node (edges into it);
+  // downstream: children are the resources that use it (edges out of it).
+  function buildTree(graph, rootQri, upstream) {
+    var nodes = graph.nodes || {};
+    var edges = graph.edges || [];
+    var count = 0;
+    function make(qri, relation, path) {
+      var meta = nodes[qri] || {};
+      var node = { qri: qri, label: meta.label, type: nodeType(qri, meta.metadata), relation: relation, children: [] };
+      count += 1;
+      if (path.indexOf(qri) >= 0) { node.cycle = true; return node; }
+      if (count > 500) { return node; }
+      var next = path.concat([qri]);
+      edges.forEach(function (e) {
+        var child = upstream ? (e.target === qri ? e.source : null) : (e.source === qri ? e.target : null);
+        if (child && child !== qri) {
+          node.children.push(make(child, e.relation || (e.metadata && e.metadata.type) || '', next));
+        }
+      });
+      return node;
+    }
+    return make(rootQri, '', []);
+  }
+
+  function graphNodeList(graph, exclude) {
+    var nodes = graph.nodes || {};
+    return Object.keys(nodes).filter(function (k) { return exclude.indexOf(k) < 0; }).map(function (k) {
+      return { qri: k, label: nodes[k].label, type: nodeType(k, nodes[k].metadata), relation: '' };
+    });
   }
 
   Viewer.prototype.resolveQri = function (q) {
@@ -1512,29 +2106,29 @@ LET _vqCount = Null(); LET _vqLimit = Null();
   Viewer.prototype.loadPlatformLineage = function (q) {
     var self = this;
     if (q.isError || this.lineage[q.key]) { if (q.isError && !this.lineage[q.key]) { this.lineage[q.key] = { error: 'The file could not be loaded, so its lineage is not available.' }; this.renderLineageIfActive(q.key); } return; }
-    var entry = { loading: true, up: [], down: [] };
+    var entry = { loading: true, upTree: null, downTree: null, down: [], further: [] };
     this.lineage[q.key] = entry;
+    this.loadCatalogLink(q);
     this.resolveQri(q).then(function (qri) {
       entry.qri = qri;
-      var upReq = lineageGet('/api/v1/lineage-graphs/nodes/', qri, '?level=resource&up=1').then(function (res) {
-        var g = firstGraph(res);
-        var nodes = g.nodes || {};
-        return (g.edges || []).filter(function (e) { return e.target === qri && e.source !== qri; }).map(function (e) {
-          var n = nodes[e.source] || {};
-          return { qri: e.source, label: n.label, type: nodeType(e.source, n.metadata), relation: e.relation || (e.metadata && e.metadata.type) || '' };
-        });
+      var upReq = lineageGet('/api/v1/lineage-graphs/nodes/', qri, '?level=resource&up=' + LINEAGE_DEPTH).then(function (res) {
+        entry.upTree = buildTree(firstGraph(res), qri, true);
       });
-      var downReq = lineageGet('/api/v1/lineage-graphs/impact/', qri, '/overview?down=1').then(function (res) {
-        var g = firstGraph(res);
-        var nodes = g.nodes || {};
-        return Object.keys(nodes).filter(function (k) { return k !== qri; }).map(function (k) {
-          return { qri: k, label: nodes[k].label, type: nodeType(k, nodes[k].metadata), relation: '' };
-        });
+      var downReq = Promise.all([
+        lineageGet('/api/v1/lineage-graphs/impact/', qri, '/overview?down=' + LINEAGE_DEPTH),
+        lineageGet('/api/v1/lineage-graphs/impact/', qri, '/overview?down=1')
+      ]).then(function (res) {
+        var all = firstGraph(res[0]);
+        if ((all.edges || []).length) {
+          entry.downTree = buildTree(all, qri, false);
+        } else {
+          entry.down = graphNodeList(firstGraph(res[1]), [qri]);
+          var direct = entry.down.map(function (n) { return n.qri; });
+          entry.further = graphNodeList(all, [qri].concat(direct));
+        }
       });
       return Promise.all([upReq, downReq]);
-    }).then(function (res) {
-      entry.up = res[0];
-      entry.down = res[1];
+    }).then(function () {
       entry.loading = false;
       self.renderLineageIfActive(q.key);
     }).catch(function (err) {
@@ -1654,6 +2248,7 @@ LET _vqCount = Null(); LET _vqLimit = Null();
       case 'tab':
         this.activeKey = Number(target.getAttribute('data-key'));
         this.closeRecords();
+        this.closeDist();
         this.renderMain();
         break;
       case 'subtab':
@@ -1675,6 +2270,24 @@ LET _vqCount = Null(); LET _vqLimit = Null();
       case 'toggle-xml':
         this.showXml = !this.showXml;
         this.renderPanel();
+        break;
+      case 'sort':
+        this.sortRecords(Number(target.getAttribute('data-col')));
+        break;
+      case 'copy-page':
+        this.copyPage();
+        break;
+      case 'export-xlsx':
+        this.exportRecords();
+        break;
+      case 'dist':
+        this.openDist(target.getAttribute('data-field'));
+        break;
+      case 'dist-page':
+        if (this.dist && !this.dist.loading) {
+          this.fetchDist(target.getAttribute('data-dir') === 'next' ? this.dist.top + DIST_ROWS : Math.max(0, this.dist.top - DIST_ROWS));
+          this.renderDist();
+        }
         break;
       case 'install-script':
         this.installScript();

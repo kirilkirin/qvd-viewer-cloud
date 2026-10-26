@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.4.0 — October 2026
+
+### Features
+- Profile tab: type, non-null and null counts, null %, distinct values, unique %, minimum, maximum and average for each field.
+- Value distribution: select a field on the Profile tab to see its values and row counts, most frequent first, 100 values per page.
+- Records tab: sort by any column, copy the current page for Excel, and export the loaded rows to an `.xlsx` file.
+- Lineage tab: upstream and downstream lineage as a tree, up to 5 levels each way.
+- Links to the file's dataset page and lineage view in the Qlik Cloud Catalog.
+
+### Changes
+- The load script is unchanged (version 1.2). Apps that already have it do not need an update.
+
 ## v1.3.0 — October 2026
 
 First shared version.
