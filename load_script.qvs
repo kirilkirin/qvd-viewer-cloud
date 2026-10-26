@@ -1,0 +1,130 @@
+// =====================================================================
+// QVD Viewer for Qlik Cloud - load script (version 1.2)
+// The QVD Viewer extension sets these variables, as app variables before a reload in
+// the open session, or as reload variables through POST /api/v1/reloads:
+//   vQvdCount       number of QVD files selected (1 to 18)
+//   vQvdRowLimit    rows to load per QVD (0 = all rows)
+//   vQvdFile1..18   full library path of each QVD, for example
+//                   lib://DataFiles/folder/file.qvd           (personal space)
+//                   lib://Space name:DataFiles/folder/file.qvd (shared or managed space)
+// If vQvdCount is missing, it defaults to 0 and only the QvdRun table loads.
+// The script only reads these variables and never assigns them, so the extension can update them.
+// =====================================================================
+
+SET ErrorMode = 0;   // Continue when one file fails. Each failure is recorded in QvdStatus.
+
+LET _vqCount = If(Len('$(vQvdCount)') = 0, 0, Num#('$(vQvdCount)'));
+LET _vqLimit = If(Len('$(vQvdRowLimit)') = 0, 1000, Num#('$(vQvdRowLimit)'));
+LET vQvdFirstN = If($(_vqLimit) > 0, $(_vqLimit), 2000000000);
+
+QvdRun:
+LOAD
+    Timestamp(Now(1))  AS [Run Time],
+    $(_vqCount)        AS [Run File Count],
+    $(_vqLimit)        AS [Run Row Limit]
+AUTOGENERATE 1;
+
+FOR i = 1 TO $(_vqCount)
+
+    LET vPath      = '$(vQvdFile$(i))';
+    LET vErrBefore = ScriptErrorCount;
+
+    // ---- File summary (Qvd* file functions) ----
+    QvdFiles:
+    LOAD
+        $(i)                                        AS QvdKey,
+        '$(vPath)'                                  AS [File Path],
+        SubField('$(vPath)', '/', -1)               AS [File Name],
+        If(Index('$(vPath)', ':DataFiles') > 0,
+           TextBetween('$(vPath)', 'lib://', ':DataFiles'),
+           'Personal')                              AS [Space],
+        QvdTableName('$(vPath)')                    AS [Table Name],
+        QvdNoOfRecords('$(vPath)')                  AS [Record Count],
+        QvdNoOfFields('$(vPath)')                   AS [Field Count],
+        QvdCreateTime('$(vPath)')                   AS [Create Time]
+    AUTOGENERATE 1;
+
+    // ---- Table header (XML header of the QVD) ----
+    QvdHeader:
+    LOAD
+        $(i)              AS QvdKey,
+        QvBuildNo         AS [Qlik Build Number],
+        CreatorDoc        AS [Creator App],
+        CreateUtcTime     AS [Create Time UTC],
+        SourceFileSize    AS [Source File Size],
+        TableName         AS [Header Table Name],
+        RecordByteSize    AS [Record Byte Size],
+        NoOfRecords       AS [Header Record Count],
+        Comment           AS [Table Comment]
+    FROM [$(vPath)] (XmlSimple, table is [QvdTableHeader]);
+
+    // ---- Lineage ----
+    QvdLineage:
+    LOAD
+        $(i)              AS QvdKey,
+        RecNo()           AS [Lineage Position],
+        Discriminator     AS [Lineage Source],
+        Statement         AS [Lineage Statement]
+    FROM [$(vPath)] (XmlSimple, table is [QvdTableHeader/Lineage/LineageInfo]);
+
+    // ---- Field headers ----
+    QvdFields:
+    LOAD
+        $(i)                    AS QvdKey,
+        RecNo()                 AS [Field Position],
+        FieldName               AS [Field Name],
+        NoOfSymbols             AS [Distinct Values],
+        BitOffset               AS [Bit Offset],
+        BitWidth                AS [Bit Width],
+        Bias                    AS [Bias],
+        Offset                  AS [Symbol Offset],
+        Length                  AS [Symbol Length],
+        Comment                 AS [Field Comment],
+        [NumberFormat/Type]     AS [Number Format Type],
+        [NumberFormat/Fmt]      AS [Number Format Pattern],
+        [NumberFormat/nDec]     AS [Number Format Decimals],
+        [NumberFormat/Dec]      AS [Decimal Separator],
+        [NumberFormat/Thou]     AS [Thousands Separator]
+    FROM [$(vPath)] (XmlSimple, table is [QvdTableHeader/Fields/QvdFieldHeader]);
+
+    // ---- Records: one table per QVD, fields prefixed with Q<n>. ----
+    // __Row keeps duplicate records apart and keeps the load order.
+    QUALIFY *;
+    [Q$(i)]:
+    FIRST $(vQvdFirstN) LOAD RecNo() AS __Row, * FROM [$(vPath)] (qvd);
+    UNQUALIFY *;
+
+    // ---- Raw XML header, one row per line, up to </QvdTableHeader> ----
+    // The extension parses it to show every header element, including field tags.
+    LET vHdrLines = Alt(QvdNoOfFields('$(vPath)'), 0) * 40 + 500;
+    _HdrTmp:
+    FIRST $(vHdrLines) LOAD RecNo() AS _LineNo, @1 AS _Line
+    FROM [$(vPath)] (txt, utf8, no labels, delimiter is '\x01', no quotes);
+    _HdrEnd:
+    LOAD Min(_LineNo) AS _EndNo RESIDENT _HdrTmp WHERE Index(_Line, '</QvdTableHeader>') > 0;
+    LET vHdrEnd = Alt(Peek('_EndNo', 0, '_HdrEnd'), 0);
+    QvdHeaderXml:
+    LOAD $(i) AS QvdKey, _LineNo AS [Header Line No], _Line AS [Header Line]
+    RESIDENT _HdrTmp WHERE _LineNo <= $(vHdrEnd);
+    DROP TABLES _HdrTmp, _HdrEnd;
+
+    // ---- Load status ----
+    LET vErrAfter = ScriptErrorCount;
+
+    QvdStatus:
+    LOAD
+        $(i)                                                    AS QvdKey,
+        If($(vErrAfter) > $(vErrBefore), 'Error', 'OK')         AS [Load Status],
+        If($(vErrAfter) = $(vErrBefore), Null(),
+           If(IsNull(QvdNoOfRecords('$(vPath)')),
+              'File not found or not accessible',
+              'Load error. See the reload log.'))               AS [Load Error]
+    AUTOGENERATE 1;
+
+NEXT i
+
+SET ErrorMode = 1;
+
+LET vPath = Null(); LET vErrBefore = Null(); LET vErrAfter = Null();
+LET vQvdFirstN = Null(); LET vHdrLines = Null(); LET vHdrEnd = Null(); LET i = Null();
+LET _vqCount = Null(); LET _vqLimit = Null();

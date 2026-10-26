@@ -1,0 +1,10 @@
+{
+  "name": "QVD Viewer",
+  "description": "Pick QVD files from your Qlik Cloud spaces, reload the host app with them, and browse their records and header metadata.",
+  "type": "visualization",
+  "version": "1.3.0",
+  "author": "Kiril Kirin",
+  "icon": "table",
+  "preview": "",
+  "supernova": true
+}
