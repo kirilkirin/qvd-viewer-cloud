@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.4.1 — October 2026
+
+### Fixes
+- The Catalog link now opens the file's dataset page. Before, it always showed "Not found in the Catalog", because dataset items in the items API have no open link.
+- The Catalog link matches the file by its path in the space, so files with the same name in different folders get the right page.
+
+### Changes
+- Colored summary tiles: Records, Fields, Rows loaded and Table name have solid Qlik colors. The other tiles have a light green background.
+
 ## v1.4.0 — October 2026
 
 ### Features

@@ -1,5 +1,5 @@
 /*
- * QVD Viewer for Qlik Cloud - nebula.js visualization extension (version 1.4.0)
+ * QVD Viewer for Qlik Cloud - nebula.js visualization extension (version 1.4.1)
  *
  * How it works
  * 1. Lists the spaces you can access and the QVD files in each space
@@ -24,7 +24,7 @@ define(['@nebula.js/stardust'], function (stardust) {
   var useApp = stardust.useApp;
   var useEffect = stardust.useEffect;
 
-  var VERSION = '1.4.0';
+  var VERSION = '1.4.1';
   var MAX_FILES = 18;          // 20 reload variables minus vQvdCount and vQvdRowLimit
   var MAX_VAR_LENGTH = 256;    // maximum length of a reload variable value
   var PAGE_ROWS = 50;          // records per page
@@ -322,11 +322,18 @@ LET _vqCount = Null(); LET _vqLimit = Null();
     '.qvdv-alert.is-info{background:var(--g-soft);color:var(--g-dark);border-color:#bfe5cd}',
     '.qvdv-alert pre{white-space:pre-wrap;font-size:11px;margin:6px 0 0;max-height:160px;overflow:auto}',
     '.qvdv-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-bottom:12px}',
-    '.qvdv-card{border:1px solid var(--line);border-radius:6px;padding:8px 10px;min-width:0}',
-    '.qvdv-card-k{font-size:11px;color:var(--ink3);text-transform:uppercase;letter-spacing:.3px}',
+    '.qvdv-card{background:#f2f9f5;border-left:3px solid var(--g);border-radius:6px;padding:8px 10px;min-width:0}',
+    '.qvdv-card-k{font-size:11px;color:var(--ink2);text-transform:uppercase;letter-spacing:.3px}',
     '.qvdv-card-v{font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.qvdv-card-v.is-small{font-size:12px;font-weight:500;white-space:normal;word-break:break-all}',
     '.qvdv-card-v a{color:var(--g-dark)}',
+    '.qvdv-card.is-kpi{border-left:0;padding:10px 12px;color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.12)}',
+    '.qvdv-card.is-kpi .qvdv-card-k{color:#fff}',
+    '.qvdv-card.is-kpi .qvdv-card-v{font-size:22px;font-weight:700;line-height:1.2;margin-top:2px}',
+    '.qvdv-card.is-green{background:#008936}',
+    '.qvdv-card.is-blue{background:#19426c}',
+    '.qvdv-card.is-ocean{background:#006580}',
+    '.qvdv-card.is-plum{background:#94579c}',
     '.qvdv-sub{display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap}',
     '.qvdv-subtab{border:1px solid var(--line);background:#fff;border-radius:14px;padding:3px 12px;font:inherit;cursor:pointer;color:var(--ink2)}',
     '.qvdv-subtab.is-active{background:var(--ink);border-color:var(--ink);color:#fff}',
@@ -1679,13 +1686,17 @@ LET _vqCount = Null(); LET _vqLimit = Null();
       }
       return apiAll('/api/v1/items?resourceType=dataset&limit=100&spaceId=' + encodeURIComponent(spaceId) + '&name=' + encodeURIComponent(base), 500);
     }).then(function (items) {
+      // Match on the path inside the space (resourceAttributes.technicalName, for example
+      // "Folder/File.qvd"). Fall back to the name only when it is unique.
       var full = name.toLowerCase();
       var sameName = items.filter(function (it) { return String(it.name || '').toLowerCase() === base.toLowerCase(); });
       var exact = sameName.filter(function (it) {
-        return JSON.stringify(it.resourceAttributes || {}).toLowerCase().indexOf('"' + full + '"') >= 0;
+        return String((it.resourceAttributes || {}).technicalName || '').toLowerCase() === full;
       });
       var pick = exact[0] || (sameName.length === 1 ? sameName[0] : null);
-      entry.url = pick && pick.links && pick.links.open && pick.links.open.href ? pick.links.open.href : null;
+      // Dataset items have no links.open. The Catalog dataset page is /dataset/<item id>.
+      var open = pick && pick.links && pick.links.open && pick.links.open.href;
+      entry.url = open || (pick && pick.id ? window.location.origin + '/dataset/' + encodeURIComponent(pick.id) : null);
     }).catch(function () {
       entry.url = null;
     }).then(function () {
@@ -1784,14 +1795,14 @@ LET _vqCount = Null(); LET _vqLimit = Null();
         : esc(appId))
       : '';
     var loaded = q.table ? q.table.rows : 0;
-    function card(k, v, small) {
-      return '<div class="qvdv-card"><div class="qvdv-card-k">' + esc(k) + '</div><div class="qvdv-card-v' + (small ? ' is-small' : '') + '" title="' + (small ? '' : esc(String(v).replace(/<[^>]+>/g, ''))) + '">' + (v === '' ? '–' : v) + '</div></div>';
+    function card(k, v, small, kpi) {
+      return '<div class="qvdv-card' + (kpi ? ' is-kpi is-' + kpi : '') + '"><div class="qvdv-card-k">' + esc(k) + '</div><div class="qvdv-card-v' + (small ? ' is-small' : '') + '" title="' + (small ? '' : esc(String(v).replace(/<[^>]+>/g, ''))) + '">' + (v === '' ? '–' : v) + '</div></div>';
     }
     box.innerHTML = '<div class="qvdv-cards">' +
-      card('Records', esc(fmtInt(num(f['Record Count'])))) +
-      card('Fields', esc(fmtInt(num(f['Field Count'])))) +
-      card('Rows loaded', esc(fmtInt(loaded))) +
-      card('Table name', esc(text(f['Table Name']))) +
+      card('Records', esc(fmtInt(num(f['Record Count']))), false, 'green') +
+      card('Fields', esc(fmtInt(num(f['Field Count']))), false, 'blue') +
+      card('Rows loaded', esc(fmtInt(loaded)), false, 'ocean') +
+      card('Table name', esc(text(f['Table Name'])), false, 'plum') +
       card('Created (UTC)', esc(text(h['Create Time UTC']))) +
       card('Record size', esc(text(h['Record Byte Size']) ? text(h['Record Byte Size']) + ' bytes' : '')) +
       card('Space', esc(text(f.Space))) +
